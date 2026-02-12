@@ -1,0 +1,36 @@
+{
+  "name": "3-workers",
+  "description": "1 Queen + 3 Workers layout",
+  "totalPanes": 4,
+  "split": {
+    "direction": "vertical",
+    "ratio": 0.4,
+    "first": {
+      "role": "queen",
+      "title": "Queen"
+    },
+    "second": {
+      "direction": "horizontal",
+      "ratio": 0.33,
+      "first": {
+        "role": "worker",
+        "index": 1,
+        "title": "Worker-1"
+      },
+      "second": {
+        "direction": "horizontal",
+        "ratio": 0.5,
+        "first": {
+          "role": "worker",
+          "index": 2,
+          "title": "Worker-2"
+        },
+        "second": {
+          "role": "worker",
+          "index": 3,
+          "title": "Worker-3"
+        }
+      }
+    }
+  }
+}

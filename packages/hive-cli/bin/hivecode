@@ -1,0 +1,604 @@
+#!/usr/bin/env bash
+#
+# hivecode - Multi-instance parallel Claude Code workflow
+#
+# This is a hybrid script:
+# - If TypeScript CLI is built, it delegates to it
+# - Otherwise, it falls back to the bash implementation
+#
+# Usage:
+#   hivecode              Start Queen (Claude Code)
+#   hivecode workers up   Start all 4 Workers
+#   hivecode dashboard    Monitor Workers in TUI
+#   hivecode --help       Show help
+#
+
+set -e
+
+VERSION="0.2.0"
+
+# ============================================================
+# Determine script location and project paths
+# ============================================================
+# Resolve symlinks to find actual script location
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+    DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+    SOURCE="$(readlink "$SOURCE")"
+    # If SOURCE was a relative symlink, resolve it relative to the symlink's directory
+    [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+PACKAGE_DIR="$(dirname "$SCRIPT_DIR")"
+CLI_PATH="$PACKAGE_DIR/dist/cli.js"
+
+# ============================================================
+# Colors
+# ============================================================
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# ============================================================
+# Configuration (for bash fallback)
+# ============================================================
+PROJECT_ROOT="$(pwd)"
+PROJECT_NAME="$(basename "$PROJECT_ROOT")"
+SESSION_NAME="hivecode-$PROJECT_NAME"
+HIVE_DIR="$PROJECT_ROOT/.hive"
+WORKTREE_BASE="$(dirname "$PROJECT_ROOT")/.worktrees/$PROJECT_NAME"
+
+# ============================================================
+# Check if TypeScript CLI is available
+# ============================================================
+if [[ -f "$CLI_PATH" ]]; then
+    # Use TypeScript CLI
+    exec node "$CLI_PATH" "$@"
+fi
+
+# ============================================================
+# Bash fallback implementation
+# (Used when TypeScript CLI is not built yet)
+# ============================================================
+
+show_help() {
+    cat << EOF
+${BLUE}hivecode${NC} - Multi-instance parallel Claude Code workflow
+
+${YELLOW}New Architecture Commands:${NC}
+  hivecode                  Start Queen (Claude Code with role injection)
+  hivecode workers up       Start all 4 Workers (detached tmux sessions)
+  hivecode workers down     Stop all Workers gracefully
+  hivecode workers restart N  Restart a specific Worker (1-4)
+  hivecode dashboard        Monitor Workers in TUI dashboard
+  hivecode status           Show Worker status
+
+${YELLOW}Other Commands:${NC}
+  hivecode init             Initialize .hive directory
+  hivecode attach [N]       Attach to Worker session
+  hivecode stop --all       Stop everything
+  hivecode clean            Clean up worktrees
+  hivecode --version        Show version
+  hivecode --help           Show this help
+
+${YELLOW}Note:${NC}
+  Build the TypeScript CLI for full functionality:
+  cd packages/hive-cli && npm install && npm run build
+
+EOF
+}
+
+check_tmux() {
+    if ! command -v tmux &>/dev/null; then
+        echo -e "${RED}Error: tmux not installed${NC}"
+        echo "Install: brew install tmux (macOS) or apt install tmux (Linux)"
+        exit 1
+    fi
+}
+
+check_claude() {
+    if ! command -v claude &>/dev/null; then
+        echo -e "${RED}Error: claude not installed${NC}"
+        echo "Install: npm install -g @anthropic-ai/claude-code"
+        exit 1
+    fi
+}
+
+session_exists() {
+    tmux has-session -t "$1" 2>/dev/null
+}
+
+# ============================================================
+# Worker management (new architecture - bash fallback)
+# ============================================================
+
+cmd_workers_up() {
+    check_tmux
+    check_claude
+
+    echo -e "${BLUE}🐝 Starting HiveCode Workers${NC}"
+    echo "   Project: $PROJECT_NAME"
+    echo ""
+
+    mkdir -p "$HIVE_DIR/tasks" "$HIVE_DIR/status"
+
+    for i in 1 2 3 4; do
+        local worker_session="hive-${PROJECT_NAME}-worker-${i}"
+
+        if session_exists "$worker_session"; then
+            echo "  Worker-$i already running"
+            continue
+        fi
+
+        # Create worktree if needed
+        local worktree_dir="$WORKTREE_BASE/worker-$i"
+        if [[ ! -d "$worktree_dir" ]]; then
+            mkdir -p "$WORKTREE_BASE"
+            git worktree add "$worktree_dir" -b "worker-$i-workspace" 2>/dev/null || true
+        fi
+
+        local work_dir="$worktree_dir"
+        [[ ! -d "$work_dir" ]] && work_dir="$PROJECT_ROOT"
+
+        # Create detached session
+        tmux new-session -d -s "$worker_session" -c "$work_dir"
+        tmux set-option -t "$worker_session" mouse on
+
+        # Enable logging
+        local log_file="/tmp/hive-${PROJECT_NAME}-worker-${i}.log"
+        : > "$log_file"
+        tmux pipe-pane -t "$worker_session" "cat >> $log_file"
+
+        # Start Claude
+        tmux send-keys -t "$worker_session" "claude --dangerously-skip-permissions" Enter
+
+        echo "  Worker-$i started ($worker_session)"
+    done
+
+    echo ""
+    echo -e "${GREEN}✅ Workers ready${NC}"
+    echo ""
+    echo "Use 'hivecode dashboard' to monitor (requires TypeScript build)"
+    echo "Or use 'hivecode attach N' to attach to a Worker"
+}
+
+cmd_workers_down() {
+    echo -e "${BLUE}🐝 Stopping HiveCode Workers${NC}"
+    echo ""
+
+    for i in 1 2 3 4; do
+        local worker_session="hive-${PROJECT_NAME}-worker-${i}"
+        if session_exists "$worker_session"; then
+            tmux send-keys -t "$worker_session" "/exit" Enter 2>/dev/null || true
+            echo "  Worker-$i stopping..."
+        fi
+    done
+
+    echo ""
+    echo -e "${GREEN}✅ Stop commands sent${NC}"
+}
+
+cmd_workers_restart() {
+    local n="$1"
+    if [[ ! "$n" =~ ^[1-4]$ ]]; then
+        echo -e "${RED}Error: Worker ID must be 1-4${NC}"
+        exit 1
+    fi
+
+    local worker_session="hive-${PROJECT_NAME}-worker-${n}"
+
+    echo -e "${BLUE}🐝 Restarting Worker-$n${NC}"
+    echo ""
+
+    if session_exists "$worker_session"; then
+        tmux kill-session -t "$worker_session"
+        echo "  Worker-$n killed"
+    fi
+
+    sleep 1
+
+    # Re-create (same logic as workers up)
+    local worktree_dir="$WORKTREE_BASE/worker-$n"
+    local work_dir="$worktree_dir"
+    [[ ! -d "$work_dir" ]] && work_dir="$PROJECT_ROOT"
+
+    tmux new-session -d -s "$worker_session" -c "$work_dir"
+    tmux set-option -t "$worker_session" mouse on
+
+    local log_file="/tmp/hive-${PROJECT_NAME}-worker-${n}.log"
+    : > "$log_file"
+    tmux pipe-pane -t "$worker_session" "cat >> $log_file"
+
+    tmux send-keys -t "$worker_session" "claude --dangerously-skip-permissions" Enter
+
+    echo "  Worker-$n restarted"
+    echo ""
+    echo -e "${GREEN}✅ Worker-$n ready${NC}"
+}
+
+cmd_workers_list() {
+    echo -e "${BLUE}🐝 HiveCode Workers${NC}"
+    echo "   Project: $PROJECT_NAME"
+    echo ""
+
+    for i in 1 2 3 4; do
+        local worker_session="hive-${PROJECT_NAME}-worker-${i}"
+        if session_exists "$worker_session"; then
+            echo -e "  ${GREEN}●${NC} Worker-$i  running"
+        else
+            echo -e "  ${NC}○${NC} Worker-$i  stopped"
+        fi
+    done
+    echo ""
+}
+
+# ============================================================
+# Queen command (new architecture - bash fallback)
+# ============================================================
+
+cmd_queen() {
+    check_claude
+
+    mkdir -p "$HIVE_DIR/tasks" "$HIVE_DIR/status"
+
+    echo -e "${BLUE}🐝 Starting HiveCode Queen${NC}"
+    echo "   Project: $PROJECT_NAME"
+    echo ""
+    echo "Starting Claude Code with Queen role..."
+    echo ""
+
+    exec claude --dangerously-skip-permissions
+}
+
+# ============================================================
+# Other commands
+# ============================================================
+
+cmd_status() {
+    cmd_workers_list
+}
+
+cmd_attach() {
+    local n="${1:-}"
+    check_tmux
+
+    if [[ -n "$n" ]]; then
+        if [[ ! "$n" =~ ^[1-4]$ ]]; then
+            echo -e "${RED}Error: Worker ID must be 1-4${NC}"
+            exit 1
+        fi
+        local worker_session="hive-${PROJECT_NAME}-worker-${n}"
+        if session_exists "$worker_session"; then
+            exec tmux attach -t "$worker_session"
+        else
+            echo -e "${RED}Worker-$n is not running${NC}"
+            exit 1
+        fi
+    else
+        # Attach to first running worker
+        for i in 1 2 3 4; do
+            local worker_session="hive-${PROJECT_NAME}-worker-${i}"
+            if session_exists "$worker_session"; then
+                exec tmux attach -t "$worker_session"
+            fi
+        done
+        echo -e "${RED}No running Workers found${NC}"
+        echo "Start Workers with: hivecode workers up"
+        exit 1
+    fi
+}
+
+cmd_stop() {
+    local all="${1:-}"
+    check_tmux
+
+    if [[ "$all" == "--all" ]]; then
+        # Kill all workers
+        for i in 1 2 3 4; do
+            local worker_session="hive-${PROJECT_NAME}-worker-${i}"
+            if session_exists "$worker_session"; then
+                tmux kill-session -t "$worker_session" 2>/dev/null || true
+            fi
+        done
+        # Kill legacy session
+        if session_exists "$SESSION_NAME"; then
+            tmux kill-session -t "$SESSION_NAME" 2>/dev/null || true
+        fi
+        rm -f "$HIVE_DIR/sessions.json" 2>/dev/null || true
+        echo -e "${GREEN}✅ All sessions stopped${NC}"
+    else
+        cmd_workers_down
+    fi
+}
+
+cmd_clean() {
+    echo "Cleaning worktrees..."
+    if [[ -d "$WORKTREE_BASE" ]]; then
+        for i in 1 2 3 4; do
+            local d="$WORKTREE_BASE/worker-$i"
+            if [[ -d "$d" ]]; then
+                git worktree remove --force "$d" 2>/dev/null || rm -rf "$d"
+                echo "  Removed: worker-$i"
+            fi
+        done
+    fi
+    echo -e "${GREEN}✅ Cleanup complete${NC}"
+}
+
+cmd_init() {
+    echo -e "${BLUE}🐝 Initializing HiveCode for $PROJECT_NAME${NC}"
+    echo ""
+
+    mkdir -p "$HIVE_DIR/tasks" "$HIVE_DIR/status"
+    echo "  ✓ Created .hive/tasks and .hive/status"
+
+    local HOOKS_DIR="$PROJECT_ROOT/.claude/hooks"
+    mkdir -p "$HOOKS_DIR"
+    echo "  ✓ Created .claude/hooks"
+
+    local HOOK_SCRIPT="$HOOKS_DIR/inject-hive-role.sh"
+    cat > "$HOOK_SCRIPT" << 'HOOKEOF'
+#!/bin/bash
+#
+# inject-hive-role.sh - Hive role auto-injection
+#
+# Auto-generated by: hivecode init
+#
+
+set -e
+
+INPUT=$(cat)
+CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
+[ -z "$CWD" ] && CWD=$(pwd)
+
+# Detect Worker worktree (path ends with /worker-N)
+if echo "$CWD" | grep -qE '/worker-[0-9]+$'; then
+    WORKER_ID=$(basename "$CWD" | sed 's/worker-//')
+    cat << EOF
+<hive-role>
+You are Hive Worker-${WORKER_ID}.
+
+Your responsibilities:
+1. Read .hive/tasks/worker-${WORKER_ID}.md to get your task
+2. Focus on completing the assigned task
+3. After completion, run lint/test to verify
+4. Update .hive/status/worker-${WORKER_ID}.json
+
+Status file format:
+{
+  "status": "idle|coding|testing|reviewing|ready_for_review|approved",
+  "branch": "feature/xxx",
+  "current": "Current work description",
+  "percent": 50,
+  "subagent": {
+    "name": "lint|test|code-review",
+    "status": "running|passed|failed",
+    "message": "Optional message"
+  }
+}
+
+Start by reading your task file.
+</hive-role>
+EOF
+    exit 0
+fi
+
+# Detect Queen (project root with .hive directory)
+if [ -d "$CWD/.hive" ]; then
+    cat << EOF
+<hive-role>
+You are Hive Queen (coordinator).
+
+Your responsibilities:
+1. Create plans and distribute tasks to .hive/tasks/worker-N.md
+2. Monitor .hive/status/ to track Worker progress
+3. When PRs are ready, have a Worker run code-reviewer subagent
+4. Coordinate merges and resolve conflicts
+
+You do NOT write code directly. Focus on coordination and decisions.
+
+Worker management commands:
+- hivecode workers up       Start all 4 Workers
+- hivecode workers down     Stop all Workers
+- hivecode workers restart N  Restart a specific Worker
+- hivecode dashboard        Monitor Workers in TUI
+- hivecode status           Show Worker status
+
+Workers are persistent and maintain context. Assign tasks based on:
+- Current workload and expertise
+- Task dependencies
+- Code review needs (1-2 Workers can review others)
+
+Start by reading .hive/assignment.md to understand the current task allocation.
+</hive-role>
+EOF
+    exit 0
+fi
+
+exit 0
+HOOKEOF
+    chmod +x "$HOOK_SCRIPT"
+    echo "  ✓ Created hook script"
+
+    local SETTINGS_FILE="$PROJECT_ROOT/.claude/settings.json"
+    if [[ -f "$SETTINGS_FILE" ]]; then
+        if grep -q "inject-hive-role.sh" "$SETTINGS_FILE" 2>/dev/null; then
+            echo "  ✓ Hook already configured in settings.json"
+        else
+            echo -e "  ${YELLOW}⚠️  settings.json exists but hook not configured${NC}"
+            echo "     Please add the hook manually or backup and re-run init"
+        fi
+    else
+        cat > "$SETTINGS_FILE" << 'SETTINGSEOF'
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/inject-hive-role.sh\"",
+            "statusMessage": "Loading Hive role..."
+          }
+        ]
+      }
+    ]
+  }
+}
+SETTINGSEOF
+        echo "  ✓ Created .claude/settings.json with hook"
+    fi
+
+    for i in 1 2; do
+        local task_file="$HIVE_DIR/tasks/worker-$i.md"
+        if [[ ! -f "$task_file" ]]; then
+            cat > "$task_file" << EOF
+---
+branch: feature/worker-$i-task
+on_complete: wait
+---
+
+# Worker-$i Task
+
+## Objective
+
+Describe the task here.
+
+## Tasks
+
+1. Task 1
+2. Task 2
+
+## Acceptance Criteria
+
+- [ ] Criterion 1
+- [ ] Criterion 2
+EOF
+        fi
+    done
+    echo "  ✓ Created sample task files"
+
+    local ASSIGNMENT_FILE="$HIVE_DIR/assignment.md"
+    if [[ ! -f "$ASSIGNMENT_FILE" ]]; then
+        cat > "$ASSIGNMENT_FILE" << EOF
+# Task Assignment
+
+## Overview
+
+Describe the overall task here.
+
+## Workers
+
+| Worker | Task | Branch |
+|--------|------|--------|
+| Worker-1 | Task description | \`feature/task-1\` |
+| Worker-2 | Task description | \`feature/task-2\` |
+| Worker-3 | (idle) | — |
+| Worker-4 | Code Review | \`review/*\` |
+
+## Acceptance Criteria
+
+1. All tests pass
+2. Code reviewed
+EOF
+        echo "  ✓ Created .hive/assignment.md"
+    fi
+
+    echo ""
+    echo -e "${GREEN}✅ HiveCode initialized!${NC}"
+    echo ""
+    echo "Next steps:"
+    echo "  1. Edit .hive/assignment.md with your task plan"
+    echo "  2. Edit .hive/tasks/worker-*.md with specific tasks"
+    echo "  3. Run 'hivecode' to start Queen"
+    echo "  4. Run 'hivecode workers up' to start Workers"
+}
+
+cmd_dashboard() {
+    echo -e "${YELLOW}Dashboard requires TypeScript build${NC}"
+    echo ""
+    echo "To build:"
+    echo "  cd packages/hive-cli"
+    echo "  npm install"
+    echo "  npm run build"
+    echo ""
+    echo "Or use 'hivecode status' for text-based status"
+    exit 1
+}
+
+# ============================================================
+# Main
+# ============================================================
+
+case "${1:-}" in
+    --help|-h)
+        show_help
+        ;;
+    --version|-v)
+        echo "hivecode $VERSION"
+        ;;
+    workers)
+        shift
+        case "${1:-}" in
+            up|start)
+                cmd_workers_up
+                ;;
+            down|stop)
+                cmd_workers_down
+                ;;
+            restart)
+                shift
+                cmd_workers_restart "$@"
+                ;;
+            list|"")
+                cmd_workers_list
+                ;;
+            # Legacy: workers <N>
+            [234])
+                echo -e "${YELLOW}Note: Legacy workers command detected${NC}"
+                echo "The new architecture uses 'hivecode workers up' for 4 detached Workers."
+                echo ""
+                echo "Proceeding with legacy behavior..."
+                echo ""
+                # Could run legacy behavior here if needed
+                exit 1
+                ;;
+            *)
+                echo -e "${RED}Unknown workers command: $1${NC}"
+                echo "Use: workers up|down|restart|list"
+                exit 1
+                ;;
+        esac
+        ;;
+    dashboard|dash)
+        cmd_dashboard
+        ;;
+    status)
+        cmd_status
+        ;;
+    attach)
+        shift
+        cmd_attach "$@"
+        ;;
+    stop)
+        shift
+        cmd_stop "$@"
+        ;;
+    clean)
+        cmd_clean
+        ;;
+    init)
+        cmd_init
+        ;;
+    queen|"")
+        cmd_queen
+        ;;
+    *)
+        echo -e "${RED}Unknown command: $1${NC}"
+        echo "Run 'hivecode --help' for usage"
+        exit 1
+        ;;
+esac

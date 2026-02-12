@@ -1,0 +1,52 @@
+{
+  "name": "hivecode",
+  "version": "0.3.0",
+  "description": "Multi-instance parallel Claude Code workflow system",
+  "type": "module",
+  "bin": {
+    "hivecode": "./bin/hivecode"
+  },
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "postinstall": "echo '✅ hivecode installed! Run: hivecode --help'"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "ai",
+    "workflow",
+    "tmux",
+    "parallel",
+    "tui"
+  ],
+  "author": "Almas",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/almax000/hive"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "dependencies": {
+    "ink": "^5.0.1",
+    "ink-spinner": "^5.0.0",
+    "react": "^18.3.1",
+    "chokidar": "^4.0.1",
+    "tail": "^2.2.6",
+    "commander": "^12.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/react": "^18.3.12",
+    "@types/tail": "^2.2.3",
+    "typescript": "^5.7.2",
+    "tsx": "^4.19.2"
+  }
+}

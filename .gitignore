@@ -1,0 +1,28 @@
+# Hive runtime files
+.hive/status/
+.hive/tasks/
+.hive/assignment.md
+.hive/sessions.json
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Node.js
+node_modules/
+dist/
+package-lock.json
+
+# CLI local config
+packages/hive-cli/.hive/
+
+# Claude Code local settings
+.claude/

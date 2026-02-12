@@ -1,0 +1,45 @@
+{
+  "name": "4-workers",
+  "description": "1 Queen + 4 Workers layout (2x2 grid for workers)",
+  "totalPanes": 5,
+  "split": {
+    "direction": "vertical",
+    "ratio": 0.35,
+    "first": {
+      "role": "queen",
+      "title": "Queen"
+    },
+    "second": {
+      "direction": "horizontal",
+      "ratio": 0.5,
+      "first": {
+        "direction": "vertical",
+        "ratio": 0.5,
+        "first": {
+          "role": "worker",
+          "index": 1,
+          "title": "Worker-1"
+        },
+        "second": {
+          "role": "worker",
+          "index": 2,
+          "title": "Worker-2"
+        }
+      },
+      "second": {
+        "direction": "vertical",
+        "ratio": 0.5,
+        "first": {
+          "role": "worker",
+          "index": 3,
+          "title": "Worker-3"
+        },
+        "second": {
+          "role": "worker",
+          "index": 4,
+          "title": "Worker-4"
+        }
+      }
+    }
+  }
+}
