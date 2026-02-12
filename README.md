@@ -1,5 +1,7 @@
 # HiveCode
 
+English | [中文](./README.zh.md)
+
 A workflow system that enables multiple Claude Code instances to work in true parallel, using Queen/Worker architecture with Git worktree isolation.
 
 ## What is HiveCode?
